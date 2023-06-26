@@ -1,0 +1,243 @@
+#include <opencv2/core.hpp>
+#include <opencv2/videoio.hpp>
+#include <opencv2/highgui.hpp>
+#include "opencv2/imgproc/imgproc.hpp"
+#include <cstdio>
+#include <string>
+#include <vector>
+#include <future>
+#include <cmath>
+#include <functional>
+
+enum States
+{
+    on = 1,
+    off = 2
+};
+
+class WireDetector
+{
+private:
+    States _state{off};
+    int _wireCap = 0;
+    int _camStreamCap = 0;
+    int _angleOffSet = 0;
+    int _xOffSet = 0;
+    int _yOffSet = 0;
+    std::future<void> _readCamStreamFuture;
+    constexpr bool GetState() const { return _state; }
+
+    constexpr float GetLineSlope(float x1, float y1, float x2, float y2) const { return (y2 - y1) / (x2 - x1); }
+
+    constexpr int GetCamStreamCap() const { return _camStreamCap; }
+
+    float GetLineCenter(cv::Vec4f &line_coords)
+    {
+        float x1, y1, x2, y2 = line_coords[0];
+
+        float x_center = (int)(x2 + x1) % 2;
+        float y_center = (int)(y2 + y1) % 2;
+
+        return x_center, y_center;
+    }
+
+    float GetLineCenterOffset(const cv::VideoCapture &cap, cv::Vec4f &wire_line_coords)
+    {
+        int frame_width = int(cap.get(3));
+        int frame_height = int(cap.get(4));
+        float wire_line_x_center, wire_line_y_center = GetLineCenter(wire_line_coords);
+        float center_x = frame_width / 2;
+        float center_y = frame_height / 2;
+        float offset_x = (center_x - wire_line_x_center) / center_x * 100;
+        float offset_y = (center_y - wire_line_y_center) / center_y * 100;
+        return offset_x, offset_y;
+    }
+
+    float GetAngleDiff(const cv::VideoCapture &cap, cv::Vec4f &wire_line_coords)
+    {
+        int frame_width = int(cap.get(3));
+        int frame_height = int(cap.get(4));
+
+        float wire_x1, wire_y1, wire_x2, wire_y2 = wire_line_coords[0];
+
+        if (wire_x1 == wire_x2)
+            wire_x1 += 0.001;
+
+        float vert_slope = GetLineSlope(frame_width % 2 + 0.001, 0, frame_width % 2, frame_height);
+        float wire_slope = GetLineSlope(wire_x1, wire_y1, wire_x2, wire_y2);
+
+        float result = std::atan((vert_slope - wire_slope) / (1 + vert_slope * wire_slope));
+
+        return result;
+    }
+
+public:
+    void TurnOn()
+    {
+        _readCamStreamFuture = std::async(std::launch::async, [this]()
+                                          { ReadCameraStreamCapture(_wireCap, _camStreamCap, _angleOffSet, _xOffSet, _yOffSet); });
+        _state = on;
+    }
+
+    void TurnOff()
+    {
+        _wireCap = 0;
+        _camStreamCap = 0;
+        _angleOffSet = 0;
+        _xOffSet = 0;
+        _yOffSet = 0;
+        _state = off;
+    }
+
+    void ReadCameraStreamCapture(int wire_cap, int &cam_stream_cap, int angle_offset, int x_offset, int y_offset)
+    {
+        std::string file_name = "/home/dlyvern/Downloads/Magic of Hong Kong. Mind-blowing cyberpunk drone video of the craziest Asia’s city by Timelab.pro.mp4";
+        cv::VideoCapture cap(file_name);
+        int frame_width = cap.get(cv::CAP_PROP_FRAME_WIDTH);
+        int frame_height = cap.get(cv::CAP_PROP_FRAME_HEIGHT);
+        int FRAME_X_CENTER = frame_width % 2;
+        int FRAME_Y_CENTER = frame_height % 2;
+        int LOW_THRESHOLD = 250;
+        int HIGH_THRESHOLD = 300;
+        int MIN_LINE_LEN = 60;
+        int MAX_LINE_GAP = 50;
+        int THRESHOLD = 100;
+        int RHO = 1;
+        float THETA = M_PI / 360;
+
+        if (!cap.isOpened())
+        {
+            printf("Couldn't read video stream");
+            cam_stream_cap = 0;
+            return;
+        }
+
+        cam_stream_cap = 1;
+
+        while (cap.isOpened())
+        {
+            auto start = std::chrono::system_clock::now();
+            cv::Mat frame;
+
+            cap >> frame;
+
+            if (frame.empty())
+            {
+                printf("Couldn't retrieve frame from camera");
+                break;
+            }
+
+            cv::Mat TD_FILTER_KERN = cv::Mat::ones(5, 5, CV_32F) / 20;
+
+            cv::Mat gray_img;
+
+            cv::cvtColor(frame, gray_img, cv::COLOR_BGR2GRAY);
+
+            cv::Mat blur_gray;
+
+            cv::filter2D(gray_img, blur_gray, -1, TD_FILTER_KERN);
+
+            cv::Mat edges;
+            printf("Canny");
+            printf("\n");
+            cv::Canny(blur_gray, edges, LOW_THRESHOLD, HIGH_THRESHOLD);
+            printf("morphologyEx");
+            printf("\n");
+            cv::morphologyEx(edges, edges, cv::MORPH_CLOSE, cv::Mat::ones(5, 5, CV_8UC1));
+
+            std::vector<cv::Vec4f> lines;
+
+            printf("HoughLinesP");
+            printf("\n");
+            cv::HoughLinesP(edges, lines, RHO, THETA, THRESHOLD, MIN_LINE_LEN, MAX_LINE_GAP);
+            
+            if (lines.empty())
+            {
+                wire_cap = 0;
+                angle_offset = 0;
+                x_offset = 0;
+                y_offset = 0;
+                cv::imshow("Video", edges);
+                cv::waitKey(30);
+                continue;
+            }
+
+            int max_distance = 0;
+
+            cv::Vec4f max_line;
+
+            for (const auto &line : lines)
+            {
+                int x1, y1, x2, y2 = line[0];
+
+                double x = x1 - x2;
+                double y = y1 - y2;
+                double distanceTmp = pow(x, 2) + pow(y, 2);
+                distanceTmp = sqrt(distanceTmp);
+                int distance = (int)distanceTmp;
+
+                if (distance > max_distance)
+                {
+                    max_distance = distance;
+                    max_line = line;
+                }
+            }
+
+            float angle_diff = GetAngleDiff(cap, max_line);
+
+            angle_offset = angle_diff;
+
+            float x_wire_offset, y_wire_offset = GetLineCenterOffset(cap, max_line);
+
+            x_offset = x_wire_offset;
+            y_offset = y_wire_offset;
+
+            // cv::putText(frame, "Angle: {angle_diff}", cv::Point(50, 50), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(255, 0, 0), 2, cv::LINE_AA);
+
+            // cv::putText(frame, "X offset: {x_wire_offset}", cv::Point(50, 100), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
+
+            // cv::putText(frame, "Y offset: {y_wire_offset}", cv::Point(50, 150), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(30, 255, 255), 2, cv::LINE_AA);
+
+            float wire_x1, wire_y1, wire_x2, wire_y2 = max_line[0];
+
+            cv::line(frame, cv::Point(wire_x1, wire_y1), cv::Point(wire_x2, wire_y2), cv::Scalar(255, 0, 0), 2);
+
+            cv::line(frame, cv::Point(0, FRAME_Y_CENTER), cv::Point(frame_width, FRAME_Y_CENTER), cv::Scalar(0, 255, 0), 1);
+
+            cv::line(frame, cv::Point(FRAME_X_CENTER, 0), cv::Point(FRAME_X_CENTER, frame_height), cv::Scalar(0, 255, 0), 1);
+
+            float wire_line_x_center, wire_line_y_center = GetLineCenter(max_line);
+
+            cv::line(frame, cv::Point(wire_line_x_center, wire_line_y_center), cv::Point(wire_line_x_center, FRAME_Y_CENTER), cv::Scalar(0, 0, 255), 2);
+
+            cv::line(frame, cv::Point(wire_line_x_center, wire_line_y_center), cv::Point(FRAME_X_CENTER, wire_line_y_center), (30, 255, 255), 2);
+
+            auto end = std::chrono::system_clock::now();
+
+            std::chrono::duration<double> diff = end - start;
+
+            printf("FPS: %f", 1.0 / diff.count());
+            printf("\n");
+
+            std::string textFPS = "FPS: ";
+            textFPS += std::to_string(1.0 / diff.count());
+            cv::putText(frame, textFPS, cv::Point(50, 200), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(30, 255, 255), 2, cv::LINE_AA);
+
+            cv::imshow("Video", frame);
+            cv::waitKey(30);
+        }
+
+        if (cv::waitKey(0) > 0)
+        {
+            cap.release();
+            cv::destroyAllWindows();
+        }
+    }
+};
+
+int main()
+{
+    WireDetector wireDetector;
+    wireDetector.TurnOn();
+    return {};
+}
