@@ -91,7 +91,7 @@ public:
 
     void ReadCameraStreamCapture(int wire_cap, int &cam_stream_cap, int angle_offset, int x_offset, int y_offset)
     {
-        std::string file_name = "/home/dlyvern/Downloads/Magic of Hong Kong. Mind-blowing cyberpunk drone video of the craziest Asia’s city by Timelab.pro.mp4";
+        std::string file_name = "";
         cv::VideoCapture cap(file_name);
         int frame_width = cap.get(cv::CAP_PROP_FRAME_WIDTH);
         int frame_height = cap.get(cv::CAP_PROP_FRAME_HEIGHT);
